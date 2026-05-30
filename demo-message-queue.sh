@@ -85,13 +85,13 @@ step "STEP 1 — Registering Alice and Bob"
 
 ALICE_RESP=$(api_post "/api/auth/register" "" \
   "{\"email\":\"$ALICE_EMAIL\",\"name\":\"Alice Demo\",\"password\":\"$PASSWORD\"}")
-ALICE_ID=$(jq_get "$ALICE_RESP" "['id']")
+ALICE_ID=$(jq_get "$ALICE_RESP" "['user']['id']")
 [[ -n "$ALICE_ID" ]] || die "Alice registration failed:\n$ALICE_RESP"
 ok "Alice registered  →  id: $ALICE_ID"
 
 BOB_RESP=$(api_post "/api/auth/register" "" \
   "{\"email\":\"$BOB_EMAIL\",\"name\":\"Bob Demo\",\"password\":\"$PASSWORD\"}")
-BOB_ID=$(jq_get "$BOB_RESP" "['id']")
+BOB_ID=$(jq_get "$BOB_RESP" "['user']['id']")
 [[ -n "$BOB_ID" ]] || die "Bob registration failed:\n$BOB_RESP"
 ok "Bob registered    →  id: $BOB_ID"
 
