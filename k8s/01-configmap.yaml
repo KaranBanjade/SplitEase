@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: splitease-config
+  namespace: splitease
+data:
+  # Service URLs (internal cluster DNS)
+  REDIS_URL: "redis://redis:6379"
+  AUTH_SERVICE_URL: "http://auth-service:8001"
+  EXPENSE_SERVICE_URL: "http://expense-service:8002"
+  DATABASE_URL: "postgresql+asyncpg://splitease:password@postgres:5432/splitease"
+
+  # App settings
+  ENVIRONMENT: "development"
+  APP_URL: "http://localhost:3000"
+  FROM_EMAIL: "noreply@splitease.app"
+  SMTP_HOST: "mailhog"
+  SMTP_PORT: "1025"
+  SMTP_USER: ""
+  VAPID_CLAIMS_EMAIL: "admin@splitease.app"
+
+  # PostgreSQL init SQL (mounted into /docker-entrypoint-initdb.d/)
+  init-db.sql: |
+    CREATE SCHEMA IF NOT EXISTS auth_schema;
+    CREATE SCHEMA IF NOT EXISTS expenses_schema;

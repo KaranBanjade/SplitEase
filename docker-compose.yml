@@ -1,0 +1,153 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: splitease
+      POSTGRES_USER: splitease
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U splitease"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://splitease:password@postgres:5432/splitease
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      FROM_EMAIL: ${FROM_EMAIL:-noreply@splitease.app}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      ENVIRONMENT: development
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/auth-service:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  expense-service:
+    build:
+      context: ./services/expense-service
+      dockerfile: Dockerfile
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://splitease:password@postgres:5432/splitease
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      AUTH_SERVICE_URL: http://auth-service:8001
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: development
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./services/expense-service:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:8001
+      EXPENSE_SERVICE_URL: http://expense-service:8002
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: development
+      PYTHONDONTWRITEBYTECODE: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/api-gateway:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      expense-service:
+        condition: service_started
+
+  notification-worker:
+    build:
+      context: ./services/notification-worker
+      dockerfile: Dockerfile
+    command: python -m app.main
+    environment:
+      DATABASE_URL: postgresql+asyncpg://splitease:password@postgres:5432/splitease
+      AUTH_SERVICE_URL: http://auth-service:8001
+      EXPENSE_SERVICE_URL: http://expense-service:8002
+      REDIS_URL: redis://redis:6379
+      PYTHONPATH: /
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      FROM_EMAIL: ${FROM_EMAIL:-noreply@splitease.app}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_CLAIMS_EMAIL: ${VAPID_CLAIMS_EMAIL:-admin@splitease.app}
+    volumes:
+      - ./services/notification-worker:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_API_URL: /api
+      VITE_VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    depends_on:
+      - api-gateway
+
+volumes:
+  postgres_data:
+  redis_data:

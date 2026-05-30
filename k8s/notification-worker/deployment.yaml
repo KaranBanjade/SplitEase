@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-worker
+  namespace: splitease
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-worker
+  template:
+    metadata:
+      labels:
+        app: notification-worker
+    spec:
+      containers:
+        - name: notification-worker
+          image: splitease/notification-worker:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.main"]
+          workingDir: "/"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: DATABASE_URL
+            - name: AUTH_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: AUTH_SERVICE_URL
+            - name: EXPENSE_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: EXPENSE_SERVICE_URL
+            - name: FROM_EMAIL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: FROM_EMAIL
+            - name: APP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: APP_URL
+            - name: SMTP_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: SMTP_HOST
+            - name: SMTP_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: SMTP_PORT
+            - name: SMTP_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: SMTP_USER
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: splitease-secrets
+                  key: SMTP_PASSWORD
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: splitease-secrets
+                  key: VAPID_PRIVATE_KEY
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: splitease-secrets
+                  key: VAPID_PUBLIC_KEY
+            - name: VAPID_CLAIMS_EMAIL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: VAPID_CLAIMS_EMAIL
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: REDIS_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

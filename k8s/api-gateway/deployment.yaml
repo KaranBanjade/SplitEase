@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: splitease
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: api-gateway
+          image: splitease/api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: AUTH_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: AUTH_SERVICE_URL
+            - name: EXPENSE_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: EXPENSE_SERVICE_URL
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: splitease-secrets
+                  key: SECRET_KEY
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: REDIS_URL
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: splitease-config
+                  key: ENVIRONMENT
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

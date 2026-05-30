@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(colima start *)",
+      "Bash(minikube addons *)",
+      "Bash(kubectl get *)",
+      "Bash(kubectl cluster-info *)",
+      "Bash(kubectl apply *)"
+    ]
+  }
+}

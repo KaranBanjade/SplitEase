@@ -1,0 +1,13 @@
+project_name = "splitease"
+environment  = "production"
+aws_region   = "us-east-1"
+db_password  = "change-me-strong-password"
+secret_key   = "change-me-run-openssl-rand-hex-32"
+
+# Optional – uncomment and fill in when ready
+# domain_name       = "app.yourdomain.com"
+# smtp_host         = "smtp.gmail.com"
+# smtp_user         = "you@gmail.com"
+# smtp_password     = "your-app-specific-password"
+# vapid_private_key = "..."
+# vapid_public_key  = "..."

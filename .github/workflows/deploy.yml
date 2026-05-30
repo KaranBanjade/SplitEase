@@ -1,0 +1,243 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'production'
+        type: choice
+        options: [production, staging]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # Never cancel an in-flight deployment
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build & push Docker images for all backend services in parallel
+  # ──────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push – ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC authentication with AWS
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, auth-service, expense-service, notification-worker]
+
+    outputs:
+      image_tag: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials (OIDC – no long-lived secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/splitease-${{ matrix.service }}:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/splitease-${{ matrix.service }}:latest
+          # Layer cache via GitHub Actions cache – speeds up subsequent builds
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            GIT_SHA=${{ github.sha }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build React SPA and deploy to S3 + CloudFront
+  # ──────────────────────────────────────────────────────────────────────────
+  build-frontend:
+    name: Build & Deploy Frontend
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: cd apps/web && npm ci
+
+      - name: Build production bundle
+        run: cd apps/web && npm run build
+        env:
+          VITE_API_URL: ${{ vars.API_URL || '/api' }}
+          VITE_VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Upload immutable hashed assets with long cache headers.
+      # index.html gets no-cache so browsers always fetch the latest shell.
+      - name: Sync hashed assets to S3
+        run: |
+          aws s3 sync apps/web/dist s3://${{ vars.S3_BUCKET }} \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable" \
+            --exclude "index.html" \
+            --exclude "*.html"
+
+      - name: Upload index.html with no-cache headers
+        run: |
+          aws s3 cp apps/web/dist/index.html s3://${{ vars.S3_BUCKET }}/index.html \
+            --cache-control "no-cache,no-store,must-revalidate" \
+            --content-type "text/html; charset=utf-8"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*" \
+            --query 'Invalidation.Id' \
+            --output text)
+          echo "Invalidation created: $INVALIDATION_ID"
+          echo "Frontend deployed: https://$(aws cloudfront get-distribution \
+            --id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --query 'Distribution.DomainName' \
+            --output text)"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Update ECS services with the new image SHA
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy-services:
+    name: Deploy ECS – ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    permissions:
+      id-token: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, auth-service, expense-service, notification-worker]
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Fetch the current task definition, swap only the image tag, register
+      # the new revision, and update the ECS service to use it.
+      - name: Update ECS service with new image
+        run: |
+          CLUSTER="splitease-production"
+          SERVICE="splitease-production-${{ matrix.service }}"
+          NEW_IMAGE="${{ env.ECR_REGISTRY }}/splitease-${{ matrix.service }}:${{ github.sha }}"
+
+          echo "Updating $SERVICE with image $NEW_IMAGE"
+
+          # Get current task definition (strip immutable fields)
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition splitease-production-${{ matrix.service }} \
+            --query 'taskDefinition' \
+            --output json)
+
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | python3 - <<'EOF'
+          import json, sys
+
+          td = json.load(sys.stdin)
+
+          # Update the image on the first (and only) container
+          td["containerDefinitions"][0]["image"] = "$NEW_IMAGE"
+
+          # Remove read-only fields that cannot be re-submitted
+          for key in [
+              "taskDefinitionArn", "revision", "status",
+              "requiresAttributes", "compatibilities",
+              "registeredAt", "registeredBy", "deregisteredAt",
+          ]:
+              td.pop(key, None)
+
+          print(json.dumps(td))
+          EOF
+          )
+
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Registered new task definition: $NEW_TASK_DEF_ARN"
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$NEW_TASK_DEF_ARN" \
+            --output text > /dev/null
+
+          echo "Waiting for service to stabilise..."
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE"
+
+          echo "${{ matrix.service }} deployed successfully."
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Post-deploy smoke test
+  # ──────────────────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [deploy-services, build-frontend]
+    if: always() && needs.deploy-services.result == 'success'
+
+    steps:
+      - name: Health check – API Gateway
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "http://${{ vars.ALB_DNS }}:8080/health" \
+            --max-time 10 --retry 5 --retry-delay 5)
+          echo "Health check status: $STATUS"
+          [ "$STATUS" = "200" ] && echo "API Gateway healthy" || exit 1
+
+      - name: Health check – Frontend (CloudFront)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://$(aws cloudfront get-distribution \
+              --id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+              --query 'Distribution.DomainName' \
+              --output text)" \
+            --max-time 15)
+          echo "Frontend status: $STATUS"
+          [ "$STATUS" = "200" ] && echo "Frontend healthy" || echo "Warning: non-200 status (may be propagating)"
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
