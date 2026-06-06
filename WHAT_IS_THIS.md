@@ -62,17 +62,6 @@ Every service uses:
 | **PostgreSQL 16** | Primary database (two schemas: `auth_schema`, `expenses_schema`) |
 | **Redis 7** | Rate-limit counters, session tokens, Redis Streams event queue |
 
-### Infrastructure / DevOps
-| | |
-|---|---|
-| **Docker + Docker Compose** | Local dev stack (one command start) |
-| **AWS ECS Fargate** | Production container orchestration |
-| **AWS RDS** | Managed PostgreSQL in production |
-| **AWS ElastiCache** | Managed Redis in production |
-| **AWS S3 + CloudFront** | Frontend CDN |
-| **Terraform** | All AWS infrastructure as code |
-| **GitHub Actions** | CI/CD — build, push to ECR, deploy to ECS |
-
 ---
 
 ## System Architecture

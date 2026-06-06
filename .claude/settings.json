@@ -5,7 +5,31 @@
       "Bash(minikube addons *)",
       "Bash(kubectl get *)",
       "Bash(kubectl cluster-info *)",
-      "Bash(kubectl apply *)"
+      "Bash(kubectl apply *)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(export DOCKER_HOST=\"unix://$HOME/.colima/default/docker.sock\")",
+      "Bash(curl -sf --max-time 5 http://localhost:3000)",
+      "Bash(docker cp *)",
+      "Bash(curl -s -X POST http://localhost:8001/auth/register -H 'Content-Type: application/json' -d '{\"email\":\"alice@test.com\",\"password\":\"password123\",\"full_name\":\"Alice Johnson\"}')",
+      "Bash(curl -s http://localhost:8001/docs)",
+      "Bash(curl -s http://localhost:8001/openapi.json)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(m,p\\) for p,ops in d['paths'].items\\(\\) for m in ops if m in \\('get','post','put','delete'\\)]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -X POST http://localhost:8001/auth/register -H 'Content-Type: application/json' -d '{\"email\":\"alice@test.com\",\"name\":\"Alice Johnson\",\"password\":\"password123\"}')",
+      "Bash(curl -s -X POST http://localhost:8001/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@test.com\",\"password\":\"password123\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('LOGIN OK - token:', d.get\\('access_token',''\\)[:30]+'...' if 'access_token' in d else d\\)\")",
+      "Bash(xargs ls -la)",
+      "Bash(timeout 60 bash -c 'until docker logs collegeproject-web-1 2>&1 | grep -q \"ready in\\\\|Local:\"; do sleep 2; done')",
+      "Bash(curl -s -X POST http://localhost:3000/api/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"alice@test.com\",\"password\":\"password123\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('OK - got token' if 'access_token' in d else d\\)\")",
+      "Bash(osascript -e 'tell application \"Terminal\" to get name of front window')",
+      "Bash(osascript)",
+      "Bash(export DOCKER_HOST=\"unix:///Users/I574046/.colima/default/docker.sock\")",
+      "Bash(echo '\\\\n# Colima Docker socket\\\\nexport DOCKER_HOST=\"unix://$HOME/.colima/default/docker.sock\"' >> ~/.zshrc && echo \"done\")"
+    ],
+    "additionalDirectories": [
+      "/Users/I574046"
     ]
   }
 }

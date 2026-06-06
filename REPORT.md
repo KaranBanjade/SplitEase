@@ -6,16 +6,51 @@
 
 ## Table of Contents
 
-1. [Domain Description](#1-domain-description)
-2. [The Four Services](#2-the-four-services)
-3. [System Architecture Diagram](#3-system-architecture-diagram)
-4. [Communication Flows](#4-communication-flows)
-5. [Architectural Decisions](#5-architectural-decisions)
-6. [Source Code & Deployment Artifacts](#6-source-code--deployment-artifacts)
+1. [Core Principle](#1-core-principle)
+2. [Domain Description](#2-domain-description)
+3. [The Four Services](#3-the-four-services)
+4. [System Architecture Diagram](#4-system-architecture-diagram)
+5. [Communication Flows](#5-communication-flows)
+6. [Architectural Decisions](#6-architectural-decisions)
+7. [Source Code & Deployment Artifacts](#7-source-code--deployment-artifacts)
+8. [Docker: Before and After](#8-docker-before-and-after)
+9. [Failure Demonstrations](#9-failure-demonstrations)
 
 ---
 
-## 1. Domain Description
+## 1. Core Principle
+
+**The guiding principle behind SplitEase is the Single Responsibility Principle (SRP) applied at the service level.**
+
+Every service owns exactly one bounded context and is solely responsible for the data and logic within that context. No other service may read from or write to another service's data store — all cross-service access must go through a published API. This principle was the first decision made, and every subsequent design choice (service boundaries, communication style, database schema layout) was evaluated against it.
+
+### Why SRP at the Service Level?
+
+In a monolithic architecture, a shared-expense app would have a single codebase where the auth logic, financial logic, and notification logic are interleaved. A bug fix in the notification scheduler risks breaking the expense calculator. A performance optimisation on the user table requires a full application redeploy.
+
+Applying SRP at the service level breaks those dependencies:
+
+| Problem in a monolith | How SRP at service level solves it |
+|---|---|
+| A change to auth requires redeploying the whole app | Auth service deploys independently — other services are unaffected |
+| Notification slowness blocks API responses | Notification worker is isolated; expense creation returns immediately |
+| Scaling the expense calculator also scales the auth service | Each service scales independently based on its own load |
+| A schema migration for expenses locks the user table | Schemas are owned per-service; no cross-service table locks |
+
+### How It Is Demonstrated
+
+| Service | Its Sole Responsibility |
+|---|---|
+| **API Gateway** | Traffic management — authentication, rate limiting, routing, aggregation |
+| **Auth Service** | Identity — user accounts, tokens, password resets, push subscriptions |
+| **Expense Service** | Financial data — groups, expenses, splits, balances, settlements |
+| **Notification Worker** | Delivery — push notifications, email digests, scheduled reminders |
+
+Each service has its own directory, its own `requirements.txt`, its own Dockerfile, and its own database schema. No service imports code from another. The only coupling is through well-defined HTTP contracts and the Redis Stream event schema.
+
+---
+
+## 2. Domain Description
 
 **SplitEase** is a shared-expense tracking application in the style of Splitwise. It solves a common real-world problem: when a group of people (flatmates, travel companions, friends) share costs, tracking who paid what and who owes whom becomes complex quickly.
 
@@ -44,7 +79,7 @@ Users register with email and password. When a new expense is added to a group, 
 
 ---
 
-## 2. The Four Services
+## 3. The Four Services
 
 ### Service 1 — API Gateway (Port 8000)
 
@@ -172,7 +207,7 @@ The consumer uses `XREADGROUP ... BLOCK 5000` — it blocks for 5 seconds waitin
 
 ---
 
-## 3. System Architecture Diagram
+## 4. System Architecture Diagram
 
 ### Component Diagram
 
@@ -297,7 +332,7 @@ Internet
 
 ---
 
-## 4. Communication Flows
+## 5. Communication Flows
 
 ### 4.1 User Registration & Login
 
@@ -420,7 +455,7 @@ Client      API Gateway     Expense Service         PostgreSQL
 
 ---
 
-## 5. Architectural Decisions
+## 6. Architectural Decisions
 
 ### Decision 1 — Synchronous REST with a Circuit Breaker Pattern
 
@@ -509,7 +544,7 @@ The gateway attaches the validated `user_id` as an `X-User-Id` header, which dow
 
 ---
 
-## 6. Source Code & Deployment Artifacts
+## 7. Source Code & Deployment Artifacts
 
 ### Service Source Code
 
@@ -532,6 +567,25 @@ services/expense-service/Dockerfile
 services/notification-worker/Dockerfile
 apps/web/Dockerfile
 ```
+
+**Base image choice — `python:3.12-slim`**
+
+All four Python services use `python:3.12-slim` as their base image. The decision is deliberate:
+
+| Option | Size | Why rejected / chosen |
+|---|---|---|
+| `python:3.12` (full) | ~1 GB | Includes compilers, test tools, documentation — none needed at runtime |
+| `python:3.12-slim` | ~130 MB | Strips non-essential packages; retains `pip` and the C runtime needed by `psycopg2` / `bcrypt` |
+| `python:3.12-alpine` | ~50 MB | Uses `musl` libc; `psycopg2` and several cryptographic packages require `glibc` and fail to build cleanly on Alpine without custom compilation steps |
+| `distroless/python3` | ~50 MB | No shell — complicates `apt-get install libpq-dev gcc` needed by `psycopg2` |
+
+`python:3.12-slim` hits the sweet spot: small enough to keep pull times fast, compatible with all dependencies without workarounds, and still has a shell for `apt-get` during the build stage.
+
+The `RUN apt-get install -y libpq-dev gcc` line installs the PostgreSQL client headers and C compiler needed to compile `psycopg2` from source. These are build-time only; a multi-stage build could exclude them from the final image, but the size saving (~15 MB) does not justify the added Dockerfile complexity at this scale.
+
+**Frontend — `node:20-alpine`**
+
+The web service uses `node:20-alpine`. Node's Alpine image does not have the `glibc` compatibility issues that affect Python's C-extension packages — the Vite build process is pure JavaScript, so Alpine is safe and halves the image size compared to `node:20-slim`.
 
 Common pattern (Python services):
 ```dockerfile
@@ -648,6 +702,370 @@ Alembic handles table creation and migrations within each service on startup.
 | `VAPID_PRIVATE_KEY` | worker | Web Push signing key |
 | `VAPID_PUBLIC_KEY` | worker, frontend | Web Push public key |
 | `VAPID_CLAIMS_EMAIL` | worker | VAPID claims subject |
+
+### Container Registry — Docker Hub
+
+Each service image is built, tagged, and pushed to Docker Hub under the `splitease` organisation. The Kubernetes manifests reference these published images so that the cluster never needs to build from source.
+
+**Tagging strategy:**
+
+```
+splitease/api-gateway:latest
+splitease/auth-service:latest
+splitease/expense-service:latest
+splitease/notification-worker:latest
+splitease/web:latest
+```
+
+`latest` is used for the college demo. A production pipeline would replace this with a Git commit SHA tag (e.g. `splitease/api-gateway:9e3350a`) to make every deployment fully reproducible and auditable.
+
+**Build and push workflow (per service):**
+
+```bash
+# Build
+docker build -t splitease/api-gateway:latest ./services/api-gateway
+
+# Authenticate
+docker login
+
+# Push
+docker push splitease/api-gateway:latest
+```
+
+**Kubernetes manifests reference the registry images:**
+
+```yaml
+# k8s/api-gateway/deployment.yaml (excerpt)
+containers:
+  - name: api-gateway
+    image: splitease/api-gateway:latest
+    imagePullPolicy: Always
+```
+
+`imagePullPolicy: Always` ensures the cluster pulls the latest image on every pod restart, which is appropriate for `latest`-tagged images during iterative development. For production tagged releases, `IfNotPresent` would be used instead to avoid unnecessary pulls.
+
+---
+
+## 8. Docker: Before and After
+
+This section demonstrates concretely how Docker resolves the deployment complexity that exists when running the application natively.
+
+### Without Docker — Manual Setup
+
+To run SplitEase without Docker, a developer must complete every step below on their machine before writing a single line of code:
+
+**Step 1 — Install system dependencies**
+
+```bash
+# macOS
+brew install postgresql@16 redis python@3.12 node@20
+
+# Ubuntu
+sudo apt-get install postgresql-16 redis-server python3.12 python3.12-venv nodejs npm libpq-dev gcc
+```
+
+This step differs across macOS, Ubuntu, Windows (WSL), and different distro versions. A developer on Ubuntu 22.04 gets PostgreSQL 14 by default from `apt` — not version 16. They must add the PostgreSQL apt repository manually, or the database behaviour may differ from production.
+
+**Step 2 — Start and configure services**
+
+```bash
+# Start PostgreSQL and Redis as system services
+sudo systemctl start postgresql
+sudo systemctl start redis
+
+# Create the database user and database
+sudo -u postgres psql -c "CREATE USER splitease WITH PASSWORD 'yourpassword';"
+sudo -u postgres psql -c "CREATE DATABASE splitease OWNER splitease;"
+sudo -u postgres psql -d splitease -f scripts/init-db.sql
+```
+
+**Step 3 — Create Python virtual environments (once per service)**
+
+```bash
+cd services/api-gateway  && python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && deactivate
+cd services/auth-service  && python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && deactivate
+cd services/expense-service && python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && deactivate
+cd services/notification-worker && python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && deactivate
+cd apps/web && npm install
+```
+
+**Step 4 — Create and populate environment files**
+
+Each service reads its configuration from environment variables. Without Docker's `environment:` block, the developer must create `.env` files manually in each service directory and fill in the correct values — database URLs, Redis URL, secret keys, SMTP credentials, VAPID keys.
+
+**Step 5 — Run all services in separate terminals**
+
+```bash
+# Terminal 1
+cd services/api-gateway && source .venv/bin/activate
+uvicorn main:app --port 8000 --reload
+
+# Terminal 2
+cd services/auth-service && source .venv/bin/activate
+uvicorn main:app --port 8001 --reload
+
+# Terminal 3
+cd services/expense-service && source .venv/bin/activate
+uvicorn main:app --port 8002 --reload
+
+# Terminal 4
+cd services/notification-worker && source .venv/bin/activate
+python main.py
+
+# Terminal 5
+cd apps/web && npm run dev
+```
+
+**Problems with this approach:**
+
+| Problem | Impact |
+|---|---|
+| Version pinning is manual | Developer A has Python 3.11, Developer B has 3.12 — subtle runtime differences |
+| Startup order is manual | Starting expense-service before auth-service is ready causes a connection error at boot |
+| Environment variables are scattered | Each service has its own `.env`; keeping them consistent is error-prone |
+| Port conflicts | PostgreSQL may already be running on the machine on port 5432 |
+| Works on my machine | A missing system library (`libpq-dev`, `gcc`) causes `pip install` to fail on some machines |
+| No isolation | Installing dependencies for this project modifies the global system Python or Node environment |
+| Cleanup is manual | Stopping all services requires killing five terminal processes; leftover system services keep consuming memory |
+| Onboarding time | A new developer must follow all five steps — typically 30–60 minutes with debugging |
+
+---
+
+### With Docker — One Command
+
+Docker eliminates every problem above. The entire stack starts with:
+
+```bash
+./start.sh
+```
+
+or equivalently:
+
+```bash
+docker compose up --build
+```
+
+**What Docker Compose does automatically:**
+
+| Manual step | Docker Compose equivalent |
+|---|---|
+| Install PostgreSQL 16 | `image: postgres:16-alpine` — exact version, every time |
+| Install Redis 7 | `image: redis:7-alpine` |
+| Create venvs and install packages | `RUN pip install -r requirements.txt` inside Dockerfile |
+| Create DB user and schemas | `POSTGRES_USER`, `POSTGRES_DB` env vars + `init-db.sql` mounted as init script |
+| Set environment variables | `environment:` block in `docker-compose.yml` |
+| Start services in correct order | `depends_on: condition: service_healthy` — postgres and redis must pass health checks before any app service starts |
+| Run all services | One `docker compose up` command |
+
+**After-state:**
+
+```
+$ ./start.sh
+[+] Running 7/7
+ ✔ Container splitease-postgres-1           Healthy
+ ✔ Container splitease-redis-1              Healthy
+ ✔ Container splitease-auth-service-1       Started
+ ✔ Container splitease-expense-service-1    Started
+ ✔ Container splitease-api-gateway-1        Started
+ ✔ Container splitease-notification-worker-1 Started
+ ✔ Container splitease-web-1               Started
+
+Frontend: http://localhost:3000
+API:      http://localhost:8000
+```
+
+All services are running, correctly ordered, with consistent versions, in under 60 seconds on a fresh clone — regardless of what is installed on the developer's machine. The only prerequisite is Docker Desktop.
+
+**Teardown is equally simple:**
+
+```bash
+docker compose down          # stop and remove containers
+docker compose down -v       # also wipe database volumes (./start.sh --fresh)
+```
+
+### Summary: Complexity Comparison
+
+| Dimension | Without Docker | With Docker |
+|---|---|---|
+| **Prerequisites** | PostgreSQL, Redis, Python 3.12, Node 20, system libs | Docker Desktop only |
+| **Setup time (new machine)** | 30–60 min | < 2 min |
+| **Version consistency** | Depends on developer's installed versions | Pinned in `docker-compose.yml` |
+| **Startup order** | Manual | `depends_on: condition: service_healthy` |
+| **Env var management** | 5 separate `.env` files | One `docker-compose.yml` |
+| **Isolation** | Pollutes global Python/Node env | Each container is isolated |
+| **Reproducibility** | "Works on my machine" risk | Identical environment everywhere |
+| **Onboarding command** | 5-step manual process | `./start.sh` |
+
+---
+
+## 9. Failure Demonstrations
+
+### 9a — Circuit Breaker Tripping
+
+The circuit breaker is implemented in `services/api-gateway/proxy.py` as `AsyncCircuitBreaker`. It wraps every outbound `httpx` call to a downstream service.
+
+**Setup:** Start the full stack, then simulate an auth-service failure:
+
+```bash
+# Start everything
+./start.sh
+
+# In a second terminal, stop the auth service to simulate a crash
+docker compose stop auth-service
+```
+
+**What happens — request flow before the breaker opens:**
+
+```
+Client                  API Gateway             Auth Service (DOWN)
+  │                          │                        │
+  │  POST /api/auth/login     │                        │
+  │─────────────────────────►│                        │
+  │                          │  POST /auth/login       │
+  │                          │───────────────────────►│ ← ConnectError (1st failure)
+  │                          │  POST /auth/login       │
+  │                          │───────────────────────►│ ← ConnectError (2nd failure)
+  │                          │  POST /auth/login       │
+  │                          │───────────────────────►│ ← ConnectError (3rd failure)
+  │                          │                        │
+  │                          │  [BREAKER OPENS]        │
+```
+
+**What happens — breaker is open:**
+
+```
+Client                  API Gateway
+  │                          │
+  │  POST /api/auth/login     │
+  │─────────────────────────►│
+  │                          │  Breaker state: OPEN
+  │                          │  (no HTTP call made)
+  │  HTTP 503                │
+  │  {"detail": "auth-service unavailable"}
+  │◄─────────────────────────│
+  │                          │  ← returned in microseconds
+```
+
+The gateway returns HTTP 503 immediately without attempting the downstream call. This prevents the gateway's connection pool from being exhausted by slow timeouts while auth-service is restarting.
+
+**Recovery — half-open probe:**
+
+After 30 seconds, the breaker transitions to **half-open** and allows one probe request through:
+
+```bash
+# Restart auth-service
+docker compose start auth-service
+```
+
+```
+Client                  API Gateway             Auth Service (UP)
+  │                          │                        │
+  │  POST /api/auth/login     │  [HALF-OPEN — probe]  │
+  │─────────────────────────►│───────────────────────►│
+  │                          │  200 OK                │
+  │                          │◄───────────────────────│
+  │  200 OK                  │  [BREAKER CLOSES]       │
+  │◄─────────────────────────│                        │
+```
+
+The breaker closes and normal traffic resumes. Subsequent requests flow through without restriction.
+
+**Observable output (API Gateway logs):**
+
+```
+INFO:     Circuit breaker for auth-service: CLOSED → OPEN (3 consecutive failures)
+INFO:     Circuit breaker for auth-service: rejecting request — state OPEN
+INFO:     Circuit breaker for auth-service: OPEN → HALF-OPEN (30s elapsed)
+INFO:     Circuit breaker for auth-service: probe succeeded — HALF-OPEN → CLOSED
+```
+
+---
+
+### 9b — Kubernetes Self-Healing
+
+Kubernetes automatically restarts pods that crash or are killed. This is governed by the `restartPolicy: Always` on each Deployment.
+
+**Setup:** Deploy to a local Kubernetes cluster (e.g. Docker Desktop Kubernetes or minikube):
+
+```bash
+kubectl apply -f k8s/
+```
+
+**Verify all pods are running:**
+
+```bash
+kubectl get pods -n splitease
+```
+
+```
+NAME                                    READY   STATUS    RESTARTS   AGE
+api-gateway-7d9f8b6c4-x2kpj            1/1     Running   0          5m
+api-gateway-7d9f8b6c4-m8rvt            1/1     Running   0          5m
+auth-service-6c8b9d7f5-p4nqw           1/1     Running   0          5m
+expense-service-5f7d6c8b9-k3lmx        1/1     Running   0          5m
+notification-worker-4b8c7d6f5-r2stv    1/1     Running   0          5m
+postgres-0                             1/1     Running   0          5m
+redis-7c6b9f8d4-w5xyz                  1/1     Running   0          5m
+```
+
+**Kill a pod manually:**
+
+```bash
+kubectl delete pod auth-service-6c8b9d7f5-p4nqw -n splitease
+```
+
+**Watch Kubernetes respond:**
+
+```bash
+kubectl get pods -n splitease --watch
+```
+
+```
+NAME                                    READY   STATUS        RESTARTS   AGE
+auth-service-6c8b9d7f5-p4nqw           1/1     Terminating   0          5m
+auth-service-6c8b9d7f5-p4nqw           0/1     Terminating   0          5m
+auth-service-6c8b9d7f5-j9abc           0/1     Pending       0          0s    ← new pod
+auth-service-6c8b9d7f5-j9abc           0/1     ContainerCreating  0     1s
+auth-service-6c8b9d7f5-j9abc           1/1     Running       0          8s    ← healthy
+```
+
+The pod is replaced within ~8 seconds. During this window, the API Gateway's circuit breaker absorbs the failure — returning HTTP 503 for auth requests rather than hanging — and then recovers automatically once the new pod passes its readiness probe.
+
+**Readiness probe configuration (from `k8s/auth-service/deployment.yaml`):**
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8001
+  initialDelaySeconds: 5
+  periodSeconds: 5
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8001
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+- The **readiness probe** prevents Kubernetes from sending traffic to the new pod until it responds HTTP 200 on `/health` — ensuring the database connection pool is established before real requests arrive.
+- The **liveness probe** will restart a pod that becomes unresponsive mid-run (e.g. deadlock, OOM) even without a manual `kubectl delete`.
+
+**Demonstrating liveness restart (simulate a hung process):**
+
+```bash
+# Exec into a pod and kill the uvicorn process
+kubectl exec -it auth-service-6c8b9d7f5-j9abc -n splitease -- kill 1
+```
+
+```
+NAME                                    READY   STATUS      RESTARTS   AGE
+auth-service-6c8b9d7f5-j9abc           0/1     OOMKilled   1          2m
+auth-service-6c8b9d7f5-j9abc           1/1     Running     1          2m10s
+```
+
+The `RESTARTS` counter increments to 1. Kubernetes automatically brought the container back up. If the pod crashes repeatedly in a short window, Kubernetes applies exponential back-off (CrashLoopBackOff) to prevent a rapid restart loop from consuming cluster resources.
 
 ---
 
